@@ -15,8 +15,9 @@ This repository forked the content of that repo and aims to keep evolving toward
 
 
 ## Latest News
-- **2026-03-11**: Added model selection to Streamlit UI — now supports choosing both Main Model (VLM) and Image Generation Model, with preset options and custom input for OpenRouter etc.
-- **2026-03-11**: Added OpenRouter support.
+- **2026-03-11**: Published PaperBanana as a [ClawHub skill](https://clawhub.ai/skills/paperbanana) — install with `clawhub install paperbanana`.
+- **2026-03-11**: Added model selection to Streamlit UI — now supports choosing both Main Model (VLM) and Image Generation Model, with preset options and custom input.
+- **2026-03-11**: Added OpenRouter support — use models from OpenAI, Anthropic, and other providers via a unified API.
 - **2026-03-11**: Added Contributors section with all-contributors bot support.
 
 ## TODO List
