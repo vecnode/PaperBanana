@@ -18,6 +18,11 @@
 defaults:
   main_model_name: "gemini-3.1-pro-preview"
   image_gen_model_name: "gemini-3.1-flash-image-preview"
+
+# Local Ollama (OpenAI-compatible). No cloud API keys required when use_local_api is true.
+ollama:
+  use_local_api: false
+  base_url: "http://127.0.0.1:11434/v1"
   
 # API Keys. If you are using all gemini models, you can leave the other keys empty.
 api_keys:

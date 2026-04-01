@@ -164,7 +164,21 @@ class PolishAgent(BaseAgent):
         # Generate polished image
         aspect_ratio = data.get("additional_info", {}).get("rounded_ratio", "16:9")
         try:
-            if generation_utils.openrouter_client is not None:
+            if generation_utils.USING_LOCAL_OLLAMA_API:
+                image_config = {
+                    "system_prompt": self.system_prompt,
+                    "temperature": self.exp_config.temperature,
+                    "aspect_ratio": aspect_ratio,
+                    "image_size": "1k",
+                }
+                response_list = await generation_utils.call_ollama_image_generation_with_retry_async(
+                    model_name=self.image_gen_model_name,
+                    contents=content_list,
+                    config=image_config,
+                    max_attempts=5,
+                    retry_delay=30,
+                )
+            elif generation_utils.openrouter_client is not None:
                 image_config = {
                     "system_prompt": self.system_prompt,
                     "temperature": self.exp_config.temperature,

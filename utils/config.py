@@ -45,17 +45,22 @@ class ExpConfig:
         if hasattr(time, "tzset"):
             time.tzset()  # Only available on Unix; no-op guard for Windows
         
+        import yaml
+        model_config_data = {}
+        config_path = self.work_dir / "configs" / "model_config.yaml"
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                model_config_data = yaml.safe_load(f) or {}
+
+        use_ollama = bool((model_config_data.get("ollama") or {}).get("use_local_api", False))
+        if os.environ.get("USING_LOCAL_OLLAMA_API", "").lower() in ("1", "true", "yes"):
+            use_ollama = True
+
         # Fallback to yaml config if no model name provided
-        if not self.main_model_name or not self.image_gen_model_name:
-            import yaml
-            config_path = self.work_dir / "configs" / "model_config.yaml"
-            if config_path.exists():
-                with open(config_path, "r", encoding="utf-8") as f:
-                    model_config_data = yaml.safe_load(f) or {}
-                    if not self.main_model_name:
-                        self.main_model_name = model_config_data.get("defaults", {}).get("main_model_name", "")
-                    if not self.image_gen_model_name:
-                        self.image_gen_model_name = model_config_data.get("defaults", {}).get("image_gen_model_name", "")
+        if not self.main_model_name:
+            self.main_model_name = model_config_data.get("defaults", {}).get("main_model_name", "")
+        if not self.image_gen_model_name:
+            self.image_gen_model_name = model_config_data.get("defaults", {}).get("image_gen_model_name", "")
         # Fallback to environment variables
         if not self.main_model_name:
             self.main_model_name = os.environ.get("MAIN_MODEL_NAME", "")
@@ -63,13 +68,19 @@ class ExpConfig:
             self.image_gen_model_name = os.environ.get("IMAGE_GEN_MODEL_NAME", "")
         # Hard defaults so model name is never empty
         if not self.main_model_name:
-            self.main_model_name = "gemini-3.1-pro-preview"
-            print(f"Warning: main_model_name not configured, falling back to '{self.main_model_name}'. "
-                  "Set it in configs/model_config.yaml or via --main-model-name.")
+            self.main_model_name = "llama3.2" if use_ollama else "gemini-3.1-pro-preview"
+            print(
+                f"Warning: main_model_name not configured, falling back to '{self.main_model_name}'. "
+                "Set it in configs/model_config.yaml or via --main-model-name."
+            )
         if not self.image_gen_model_name:
-            self.image_gen_model_name = "gemini-3.1-flash-image-preview"
-            print(f"Warning: image_gen_model_name not configured, falling back to '{self.image_gen_model_name}'. "
-                  "Set it in configs/model_config.yaml or via --image-gen-model-name.")
+            self.image_gen_model_name = (
+                "llama3.2" if use_ollama else "gemini-3.1-flash-image-preview"
+            )
+            print(
+                f"Warning: image_gen_model_name not configured, falling back to '{self.image_gen_model_name}'. "
+                "Set it in configs/model_config.yaml or via --image-gen-model-name."
+            )
         self.timestamp = (
             time.strftime("%m%d_%H%M") if self.timestamp is None else self.timestamp
         )

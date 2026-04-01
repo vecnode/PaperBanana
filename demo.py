@@ -184,6 +184,27 @@ async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     image_data_url = f"data:image/jpeg;base64,{image_b64}"
 
+    from utils import generation_utils
+    if generation_utils.USING_LOCAL_OLLAMA_API:
+        try:
+            contents = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                {"type": "text", "text": edit_prompt},
+            ]
+            cfg = {"system_prompt": "", "temperature": 1.0, "aspect_ratio": aspect_ratio, "image_size": image_size}
+            result = await generation_utils.call_ollama_image_generation_with_retry_async(
+                model_name=image_model,
+                contents=contents,
+                config=cfg,
+                max_attempts=3,
+                retry_delay=10,
+                error_context="refine_image",
+            )
+            if result and result[0] != "Error":
+                return base64.b64decode(result[0]), "✅ Image refined successfully! (via Ollama)"
+        except Exception as e:
+            print(f"Ollama refine failed: {e}, falling back...")
+
     # --- Path 1: OpenRouter (preferred, matches main pipeline priority) ---
     try:
         from utils.generation_utils import call_openrouter_image_generation_with_retry_async

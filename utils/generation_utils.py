@@ -57,6 +57,11 @@ openai_client = None
 openrouter_client = None
 openrouter_api_key = ""
 
+# Local Ollama (OpenAI-compatible /v1); set True via configs/model_config.yaml ollama.use_local_api or USING_LOCAL_OLLAMA_API=1
+USING_LOCAL_OLLAMA_API = False
+OLLAMA_OPENAI_BASE_URL = ""
+ollama_client = None
+
 
 def reinitialize_clients():
     """(Re)build all API clients from current env vars / config file.
@@ -68,8 +73,15 @@ def reinitialize_clients():
     """
     global gemini_client, anthropic_client, openai_client
     global openrouter_client, openrouter_api_key
+    global model_config
+    global USING_LOCAL_OLLAMA_API, OLLAMA_OPENAI_BASE_URL, ollama_client
 
     initialized = []
+
+    _cfg_path = Path(__file__).parent.parent / "configs" / "model_config.yaml"
+    if _cfg_path.exists():
+        with open(_cfg_path, "r", encoding="utf-8-sig") as f:
+            model_config = yaml.safe_load(f) or {}
 
     api_key = get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", "")
     if api_key:
@@ -105,6 +117,22 @@ def reinitialize_clients():
         initialized.append("OpenRouter")
     else:
         openrouter_client = None
+
+    use_local_ollama = os.getenv("USING_LOCAL_OLLAMA_API", "").lower() in ("1", "true", "yes")
+    if not use_local_ollama and isinstance(model_config.get("ollama"), dict):
+        use_local_ollama = bool(model_config["ollama"].get("use_local_api", False))
+    USING_LOCAL_OLLAMA_API = use_local_ollama
+    OLLAMA_OPENAI_BASE_URL = ""
+    ollama_client = None
+    if use_local_ollama:
+        base = get_config_val("ollama", "base_url", "OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+        base = base.rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        OLLAMA_OPENAI_BASE_URL = base
+        ollama_client = AsyncOpenAI(api_key="ollama", base_url=base)
+        print("Initialized Ollama client (local OpenAI-compatible API)")
+        initialized.append("Ollama")
 
     return initialized
 
@@ -460,6 +488,94 @@ async def call_openai_with_retry_async(
     return response_text_list
 
 
+async def call_ollama_with_retry_async(
+    model_name, contents, config, max_attempts=5, retry_delay=30, error_context=""
+):
+    """
+    ASYNC: Call local Ollama via OpenAI-compatible /v1/chat/completions.
+    """
+    if ollama_client is None:
+        raise RuntimeError(
+            "Ollama client was not initialized. Set ollama.use_local_api in configs/model_config.yaml "
+            "or USING_LOCAL_OLLAMA_API=1 and OLLAMA_BASE_URL if needed."
+        )
+    system_prompt = config["system_prompt"]
+    temperature = config["temperature"]
+    candidate_num = config["candidate_num"]
+    max_completion_tokens = config["max_completion_tokens"]
+    response_text_list = []
+
+    current_contents = contents
+
+    is_input_valid = False
+    for attempt in range(max_attempts):
+        try:
+            openai_contents = _convert_to_openai_format(current_contents)
+            first_response = await ollama_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": openai_contents},
+                ],
+                temperature=temperature,
+                max_completion_tokens=max_completion_tokens,
+            )
+            content = first_response.choices[0].message.content or ""
+            if not content.strip():
+                print(f"Ollama returned empty content, retrying...")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(retry_delay)
+                continue
+            response_text_list.append(content)
+            is_input_valid = True
+            break
+
+        except Exception as e:
+            error_str = str(e).lower()
+            context_msg = f" for {error_context}" if error_context else ""
+            print(
+                f"Ollama validation attempt {attempt + 1} failed{context_msg}: {error_str}. Retrying in {retry_delay} seconds..."
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(retry_delay)
+
+    if not is_input_valid:
+        context_msg = f" for {error_context}" if error_context else ""
+        print(
+            f"Error: All {max_attempts} attempts failed to validate the input{context_msg}. Returning errors."
+        )
+        return ["Error"] * candidate_num
+
+    remaining_candidates = candidate_num - 1
+    if remaining_candidates > 0:
+        print(
+            f"Input validated. Now generating remaining {remaining_candidates} candidates..."
+        )
+        valid_openai_contents = _convert_to_openai_format(current_contents)
+        tasks = [
+            ollama_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": valid_openai_contents},
+                ],
+                temperature=temperature,
+                max_completion_tokens=max_completion_tokens,
+            )
+            for _ in range(remaining_candidates)
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                print(f"Error generating a subsequent Ollama candidate: {res}")
+                response_text_list.append("Error")
+            else:
+                response_text_list.append(res.choices[0].message.content or "Error")
+
+    return response_text_list
+
+
 async def call_openai_image_generation_with_retry_async(
     model_name, prompt, config, max_attempts=5, retry_delay=30, error_context=""
 ):
@@ -731,6 +847,134 @@ async def call_openrouter_image_generation_with_retry_async(
     return ["Error"]
 
 
+def strip_ollama_model_prefix(model_name: str) -> str:
+    if model_name.startswith("ollama/"):
+        return model_name[len("ollama/") :]
+    return model_name
+
+
+async def call_ollama_image_generation_with_retry_async(
+    model_name, contents, config, max_attempts=5, retry_delay=30, error_context=""
+):
+    """
+    ASYNC: Image generation / multimodal image output via local Ollama OpenAI-compatible API.
+    Response parsing mirrors OpenRouter (inline_data, images[], data URLs).
+    """
+    if not OLLAMA_OPENAI_BASE_URL:
+        raise RuntimeError(
+            "Ollama image generation requires local API (ollama.use_local_api or USING_LOCAL_OLLAMA_API=1)."
+        )
+
+    system_prompt = config.get("system_prompt", "")
+    temperature = config.get("temperature", 1.0)
+    aspect_ratio = config.get("aspect_ratio", "1:1")
+    image_size = config.get("image_size", "1k")
+
+    model_name = strip_ollama_model_prefix(model_name)
+    openai_contents = _convert_to_openai_format(contents)
+
+    image_config = {}
+    if aspect_ratio:
+        image_config["aspect_ratio"] = aspect_ratio
+    if image_size:
+        image_config["image_size"] = image_size
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": openai_contents},
+        ],
+        "temperature": temperature,
+        "modalities": ["image", "text"],
+    }
+    if image_config:
+        payload["image_config"] = image_config
+
+    url = f"{OLLAMA_OPENAI_BASE_URL.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": "Bearer ollama",
+        "Content-Type": "application/json",
+    }
+
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            choices = data.get("choices", [])
+            if not choices:
+                print(f"[Warning]: Ollama image generation returned no choices, retrying...")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(retry_delay)
+                continue
+
+            message = choices[0].get("message", {})
+
+            content = message.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and "inline_data" in part:
+                        b64_data = part["inline_data"].get("data", "")
+                        if b64_data:
+                            return [b64_data]
+
+            images = message.get("images")
+            if images and len(images) > 0:
+                img_item = images[0]
+                if isinstance(img_item, dict):
+                    data_url = img_item.get("image_url", {}).get("url", "")
+                else:
+                    data_url = str(img_item)
+                if "," in data_url:
+                    b64_data = data_url.split(",", 1)[1]
+                else:
+                    b64_data = data_url
+                if b64_data:
+                    return [b64_data]
+
+            if isinstance(content, str) and content.startswith("data:image"):
+                if "," in content:
+                    b64_data = content.split(",", 1)[1]
+                    if b64_data:
+                        return [b64_data]
+
+            print(f"[Warning]: Ollama image generation returned no images, retrying...")
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(retry_delay)
+            continue
+
+        except httpx.HTTPStatusError as e:
+            context_msg = f" for {error_context}" if error_context else ""
+            current_delay = min(retry_delay * (2**attempt), 60)
+            print(
+                f"Ollama image gen attempt {attempt + 1} failed{context_msg}: "
+                f"HTTP {e.response.status_code} - {e.response.text}. "
+                f"Retrying in {current_delay}s..."
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(current_delay)
+            else:
+                print(f"Error: All {max_attempts} attempts failed{context_msg}")
+                return ["Error"]
+        except Exception as e:
+            context_msg = f" for {error_context}" if error_context else ""
+            current_delay = min(retry_delay * (2**attempt), 60)
+            print(
+                f"Ollama image gen attempt {attempt + 1} failed{context_msg}: {e}. "
+                f"Retrying in {current_delay}s..."
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(current_delay)
+            else:
+                print(f"Error: All {max_attempts} attempts failed{context_msg}")
+                return ["Error"]
+
+    return ["Error"]
+
+
 def _to_openrouter_model_id(model_name: str) -> str:
     """Convert a bare model name to OpenRouter format (provider/model).
 
@@ -752,11 +996,29 @@ async def call_model_with_retry_async(
     Unified router that dispatches to the correct provider based on model_name.
 
     Routing rules:
+      0. If USING_LOCAL_OLLAMA_API: local Ollama (optional "ollama/" prefix stripped)
       1. Explicit prefix overrides: "openrouter/" -> OpenRouter, "claude-" -> Anthropic,
          "gpt-"/"o1-"/"o3-"/"o4-" -> OpenAI
       2. No prefix: auto-detect based on which API key is configured.
          Priority: OpenRouter > Gemini > Anthropic > OpenAI
     """
+    if USING_LOCAL_OLLAMA_API and ollama_client is not None:
+        actual_model = strip_ollama_model_prefix(model_name)
+        cfg_dict = {
+            "system_prompt": config.system_instruction if hasattr(config, "system_instruction") else "",
+            "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
+            "candidate_num": config.candidate_count if hasattr(config, "candidate_count") else 1,
+            "max_completion_tokens": config.max_output_tokens if hasattr(config, "max_output_tokens") else 50000,
+        }
+        return await call_ollama_with_retry_async(
+            model_name=actual_model,
+            contents=contents,
+            config=cfg_dict,
+            max_attempts=max_attempts,
+            retry_delay=retry_delay,
+            error_context=error_context,
+        )
+
     # Explicit provider prefix overrides auto-detection
     if model_name.startswith("openrouter/"):
         provider = "openrouter"
@@ -782,7 +1044,8 @@ async def call_model_with_retry_async(
         else:
             raise RuntimeError(
                 "No API client available. Please configure at least one API key "
-                "in configs/model_config.yaml or via environment variables."
+                "in configs/model_config.yaml or via environment variables, "
+                "or enable local Ollama (ollama.use_local_api / USING_LOCAL_OLLAMA_API=1)."
             )
 
     if provider == "gemini":

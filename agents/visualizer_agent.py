@@ -155,7 +155,21 @@ class VisualizerAgent(BaseAgent):
                 aspect_ratio = data["additional_info"]["rounded_ratio"]
 
             if cfg["use_image_generation"]:
-                if "gpt-image" in self.model_name:
+                if generation_utils.USING_LOCAL_OLLAMA_API:
+                    image_config = {
+                        "system_prompt": self.system_prompt,
+                        "temperature": self.exp_config.temperature,
+                        "aspect_ratio": aspect_ratio,
+                        "image_size": "1k",
+                    }
+                    response_list = await generation_utils.call_ollama_image_generation_with_retry_async(
+                        model_name=self.model_name,
+                        contents=content_list,
+                        config=image_config,
+                        max_attempts=5,
+                        retry_delay=30,
+                    )
+                elif "gpt-image" in self.model_name:
                     image_config = {
                         "size": "1536x1024",
                         "quality": "high",

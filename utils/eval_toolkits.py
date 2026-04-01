@@ -24,6 +24,7 @@ import re
 from google.genai import types
 
 from prompts import diagram_eval_prompts, plot_eval_prompts
+from utils import generation_utils
 from utils.generation_utils import (
     call_gemini_with_retry_async,
     call_claude_with_retry_async,
@@ -167,7 +168,20 @@ async def _run_single_eval_ref(
     valid_winners = ["Human", "Model", "Both are good", "Both are bad"]
     
     try:
-        if "gemini" in model_name:
+        if generation_utils.USING_LOCAL_OLLAMA_API:
+            response_text_list = await generation_utils.call_ollama_with_retry_async(
+                model_name=generation_utils.strip_ollama_model_prefix(model_name),
+                contents=content_list,
+                config={
+                    "system_prompt": sys_prompt,
+                    "temperature": 1,
+                    "candidate_num": 1,
+                    "max_completion_tokens": 10000,
+                },
+                max_attempts=5,
+                retry_delay=30,
+            )
+        elif "gemini" in model_name:
             response_text_list = await call_gemini_with_retry_async(
                 model_name=model_name,
                 contents=content_list,
